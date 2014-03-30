@@ -87,10 +87,13 @@ except ImportError:
 else:
     _PROTOCOL_NAMES[PROTOCOL_SSLv2] = "SSLv2"
 
+HAS_NPN = bool(_ssl2.HAS_NPN)
+
 from socket import socket, _fileobject, _delegate_methods, error as socket_error
 from socket import getnameinfo as _getnameinfo
 import base64        # for DER-to-PEM translation
 import errno
+import struct
 
 # Disable weak or insecure ciphers by default
 # (OpenSSL's default setting is 'DEFAULT:!aNULL:!eNULL')
@@ -106,6 +109,7 @@ class SSLSocket(socket):
     def __init__(self, sock, keyfile=None, certfile=None,
                  server_side=False, cert_reqs=CERT_NONE,
                  ssl_version=PROTOCOL_SSLv23, ca_certs=None,
+                 npn_protocols=None,
                  do_handshake_on_connect=True,
                  suppress_ragged_eofs=True, ciphers=None):
         socket.__init__(self, _sock=sock._sock)
@@ -123,6 +127,12 @@ class SSLSocket(socket):
 
         if certfile and not keyfile:
             keyfile = certfile
+
+        if npn_protocols:
+            npn_protocols = ''.join(
+                [struct.pack('b'+'c'*len(p), len(p), *p)
+                    for p in npn_protocols]
+            )
         # see if it's connected
         try:
             socket.getpeername(self)
@@ -138,7 +148,7 @@ class SSLSocket(socket):
             self._sslobj = _ssl2.sslwrap(self._sock, server_side,
                                         keyfile, certfile,
                                         cert_reqs, ssl_version, ca_certs,
-                                        ciphers)
+                                        npn_protocols, ciphers)
             if do_handshake_on_connect:
                 self.do_handshake()
         self.keyfile = keyfile
@@ -146,6 +156,7 @@ class SSLSocket(socket):
         self.cert_reqs = cert_reqs
         self.ssl_version = ssl_version
         self.ca_certs = ca_certs
+        self.npn_protocols = npn_protocols
         self.ciphers = ciphers
         self.do_handshake_on_connect = do_handshake_on_connect
         self.suppress_ragged_eofs = suppress_ragged_eofs
@@ -179,6 +190,13 @@ class SSLSocket(socket):
         certificate was provided, but not validated."""
 
         return self._sslobj.peer_certificate(binary_form)
+
+    def selected_npn_protocol(self):
+
+        if not self._sslobj or not _ssl2.HAS_NPN:
+            return None
+        else:
+            return self._sslobj.selected_npn_protocol()
 
     def cipher(self):
 
@@ -311,7 +329,8 @@ class SSLSocket(socket):
             raise ValueError("attempt to connect already-connected SSLSocket!")
         self._sslobj = _ssl2.sslwrap(self._sock, False, self.keyfile, self.certfile,
                                     self.cert_reqs, self.ssl_version,
-                                    self.ca_certs, self.ciphers)
+                                    self.ca_certs, self.npn_protocols,
+                                    self.ciphers)
         try:
             if return_errno:
                 rc = socket.connect_ex(self, addr)
@@ -353,6 +372,7 @@ class SSLSocket(socket):
                               ssl_version=self.ssl_version,
                               ca_certs=self.ca_certs,
                               ciphers=self.ciphers,
+                              npn_protocols=self.npn_protocols,
                               do_handshake_on_connect=self.do_handshake_on_connect,
                               suppress_ragged_eofs=self.suppress_ragged_eofs),
                     addr)
@@ -376,12 +396,14 @@ class SSLSocket(socket):
 def wrap_socket(sock, keyfile=None, certfile=None,
                 server_side=False, cert_reqs=CERT_NONE,
                 ssl_version=PROTOCOL_SSLv23, ca_certs=None,
+                npn_protocols=None,
                 do_handshake_on_connect=True,
                 suppress_ragged_eofs=True, ciphers=None):
 
     return SSLSocket(sock, keyfile=keyfile, certfile=certfile,
                      server_side=server_side, cert_reqs=cert_reqs,
                      ssl_version=ssl_version, ca_certs=ca_certs,
+                     npn_protocols=npn_protocols,
                      do_handshake_on_connect=do_handshake_on_connect,
                      suppress_ragged_eofs=suppress_ragged_eofs,
                      ciphers=ciphers)

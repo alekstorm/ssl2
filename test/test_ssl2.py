@@ -460,8 +460,10 @@ else:
                     if test_support.verbose and self.server.chatty:
                         sys.stdout.write(" cert binary is " + str(len(cert_binary)) + " bytes\n")
                 cipher = self.sslconn.cipher()
+                selected_npn_protocol = self.sslconn.selected_npn_protocol()
                 if test_support.verbose and self.server.chatty:
                     sys.stdout.write(" server: connection cipher is now " + str(cipher) + "\n")
+                    sys.stdout.write(" server: selected protocol is now " + str(selected_npn_protocol) + "\n")
 
             def wrap_conn(self):
                 try:
@@ -470,7 +472,9 @@ else:
                                                    ssl_version=self.server.protocol,
                                                    ca_certs=self.server.cacerts,
                                                    cert_reqs=self.server.certreqs,
+                                                   npn_protocols=self.server.npn_protocols,
                                                    ciphers=self.server.ciphers)
+                    self.server.selected_npn_protocols.append(self.sslconn.selected_npn_protocol())
                 except ssl.SSLError as e:
                     # XXX Various errors can have happened here, for example
                     # a mismatching protocol version, an invalid certificate,
@@ -557,7 +561,7 @@ else:
         def __init__(self, certificate, ssl_version=None,
                      certreqs=None, cacerts=None,
                      chatty=True, connectionchatty=False, starttls_server=False,
-                     wrap_accepting_socket=False, ciphers=None):
+                     wrap_accepting_socket=False, npn_protocols=None, ciphers=None):
 
             if ssl_version is None:
                 ssl_version = ssl.PROTOCOL_TLSv1
@@ -567,6 +571,7 @@ else:
             self.protocol = ssl_version
             self.certreqs = certreqs
             self.cacerts = cacerts
+            self.npn_protocols = npn_protocols
             self.ciphers = ciphers
             self.chatty = chatty
             self.connectionchatty = connectionchatty
@@ -579,11 +584,13 @@ else:
                                             cert_reqs = self.certreqs,
                                             ca_certs = self.cacerts,
                                             ssl_version = self.protocol,
+                                            npn_protocols = self.npn_protocols,
                                             ciphers = self.ciphers)
                 if test_support.verbose and self.chatty:
                     sys.stdout.write(' server:  wrapped server socket as %s\n' % str(self.sock))
             self.port = test_support.bind_port(self.sock)
             self.active = False
+            self.selected_npn_protocols = []
             self.conn_errors = []
             threading.Thread.__init__(self)
             self.daemon = True
@@ -632,10 +639,11 @@ else:
 
             class ConnectionHandler(asyncore.dispatcher_with_send):
 
-                def __init__(self, conn, certfile):
+                def __init__(self, conn, certfile, npn_protocols=None):
                     asyncore.dispatcher_with_send.__init__(self, conn)
                     self.socket = ssl.wrap_socket(conn, server_side=True,
                                                   certfile=certfile,
+                                                  npn_protocols=npn_protocols,
                                                   do_handshake_on_connect=False)
                     self._ssl_accepting = True
 
@@ -1387,6 +1395,48 @@ else:
                 finally:
                     sock.close()
             self.assertIn("no shared cipher", str(server.conn_errors[0]))
+
+        def test_npn_ext(self):
+            server_protocols = ['http/1.1', 'spdy/2']
+            with ThreadedEchoServer(CERTFILE,
+                                    npn_protocols=server_protocols,
+                                    chatty=True) as server:
+                def testnpn_connect(protocols):
+                    sock = socket.socket()
+                    selected_npn_protocol = "nothing"
+                    s = None
+                    try:
+                        s = ssl.wrap_socket(sock, server_side=False,
+                                            npn_protocols=protocols)
+                        s.connect((HOST, server.port))
+                        selected_npn_protocol = s.selected_npn_protocol()
+                        s.close()
+                    finally:
+                        if s: s.close()
+                        else: sock.close()
+                        return selected_npn_protocol
+
+                if ssl.HAS_NPN:
+                    protocol_tests = [
+                        (['http/1.1', 'spdy/2'], 'http/1.1'),
+                        (['spdy/2', 'http/1.1'], 'http/1.1'),
+                        (['spdy/2', 'test'], 'spdy/2'),
+                        (['abc', 'def'], 'abc'),
+                        (None, None)
+                    ]
+                    for protocols, expected in protocol_tests:
+                        result = testnpn_connect(protocols)
+                        msg = "failed trying %s (s) and %s (c).\n" \
+                              "was expecting %s, but got %%s from the %%s" \
+                                  % (str(server_protocols), str(protocols),
+                                     str(expected))
+                        self.assertEqual(result, expected, msg % (result, "client"))
+                        server_result = server.selected_npn_protocols[-1]
+                        self.assertEqual(server_result, expected, msg % (server_result, "server"))
+                else:
+                    with self.assertRaises(ssl.SSLError):
+                        result = testnpn_connect(['test'])
+                    self.assertIn("The NPN extension to TLS requires", str(server.conn_errors[-1]))
 
 
 def test_main(verbose=False):

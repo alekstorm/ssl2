@@ -121,13 +121,16 @@ static unsigned int _ssl_locks_count = 0;
 typedef struct {
     PyObject_HEAD
     PySocketSockObject *Socket;         /* Socket on which we're layered */
+    int                 socket_type;
     SSL_CTX*            ctx;
     SSL*                ssl;
     X509*               peer_cert;
     char                server[X509_NAME_MAXLEN];
     char                issuer[X509_NAME_MAXLEN];
     int                 shutdown_seen_zero;
-
+#ifdef OPENSSL_NPN_NEGOTIATED
+    char*               npn_protocols;
+#endif
 } PySSLObject;
 
 static PyTypeObject PySSL_Type;
@@ -266,12 +269,61 @@ _setSSLError (char *errstr, int errcode, char *filename, int lineno) {
     return NULL;
 }
 
+#ifdef OPENSSL_NPN_NEGOTIATED
+/* this callback gets passed to SSL_CTX_set_next_protos_advertise_cb
+ * if the connection is a server  */
+static int
+_advertiseNPN_cb(SSL *s,
+                 const unsigned char **data, unsigned int *len,
+                 void *args)
+{
+    PySSLObject *ssl_obj = (PySSLObject *) args;
+
+    if (ssl_obj->npn_protocols == NULL) {
+        *data = (unsigned char *) "";
+        *len = 0;
+    } else {
+        *data = (unsigned char *) ssl_obj->npn_protocols;
+        *len = strlen(ssl_obj->npn_protocols);
+    }
+
+    return SSL_TLSEXT_ERR_OK;
+}
+/* this callback gets passed to SSL_CTX_set_next_proto_select_cb
+ * if the connection is a client */
+static int
+_selectNPN_cb(SSL *s,
+              unsigned char **out, unsigned char *outlen,
+              const unsigned char *server, unsigned int server_len,
+              void *args)
+{
+    PySSLObject *ssl_obj = (PySSLObject *) args;
+
+    unsigned char *client = (unsigned char *) ssl_obj->npn_protocols;
+    int client_len;
+
+    if (client == NULL) {
+        client = (unsigned char *) "";
+        client_len = 0;
+    } else {
+        client_len = (unsigned int) strlen(ssl_obj->npn_protocols);
+    }
+
+    SSL_select_next_proto(out, outlen,
+                          server, server_len,
+                          client, client_len);
+
+    return SSL_TLSEXT_ERR_OK;
+}
+#endif
+
 static PySSLObject *
 newPySSLObject(PySocketSockObject *Sock, char *key_file, char *cert_file,
                enum py_ssl_server_or_client socket_type,
                enum py_ssl_cert_requirements certreq,
                enum py_ssl_version proto_version,
-               char *cacerts_file, char *ciphers)
+               char *cacerts_file, char *npn_protocols,
+               char *ciphers)
 {
     PySSLObject *self;
     char *errstr = NULL;
@@ -283,11 +335,16 @@ newPySSLObject(PySocketSockObject *Sock, char *key_file, char *cert_file,
         return NULL;
     memset(self->server, '\0', sizeof(char) * X509_NAME_MAXLEN);
     memset(self->issuer, '\0', sizeof(char) * X509_NAME_MAXLEN);
+    self->socket_type = socket_type;
     self->peer_cert = NULL;
     self->ssl = NULL;
     self->ctx = NULL;
     self->Socket = NULL;
     self->shutdown_seen_zero = 0;
+
+#ifdef OPENSSL_NPN_NEGOTIATED
+    self->npn_protocols = npn_protocols;
+#endif
 
     /* Make sure the SSL error state is initialized */
     (void) ERR_get_state();
@@ -375,6 +432,25 @@ newPySSLObject(PySocketSockObject *Sock, char *key_file, char *cert_file,
         }
     }
 
+	if(npn_protocols) {
+#ifdef OPENSSL_NPN_NEGOTIATED
+		/* next protocol negotiation */
+		if (socket_type == PY_SSL_SERVER) {
+			SSL_CTX_set_next_protos_advertised_cb(self->ctx,
+												  _advertiseNPN_cb,
+												  self);
+		} else if (socket_type == PY_SSL_CLIENT) {
+			SSL_CTX_set_next_proto_select_cb(self->ctx,
+											 _selectNPN_cb,
+											 self);
+		}
+#else
+		/* npn_protocols was set but support doesn't exist for it */
+		errstr = ERRSTR("The NPN extension to TLS requires OpenSSL 1.0.1 or later.");
+		goto fail;
+#endif
+	}
+
     /* ssl compatibility */
     SSL_CTX_set_options(self->ctx,
                         SSL_OP_ALL & ~SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
@@ -432,15 +508,18 @@ PySSL_sslwrap(PyObject *self, PyObject *args)
     char *key_file = NULL;
     char *cert_file = NULL;
     char *cacerts_file = NULL;
+    char *npn_protocols = NULL;
     char *ciphers = NULL;
 
-    if (!PyArg_ParseTuple(args, "O!i|zziizz:sslwrap",
+    if (!PyArg_ParseTuple(args, "O!i|zziizzz:sslwrap",
                           PySocketModule.Sock_Type,
                           &Sock,
                           &server_side,
                           &key_file, &cert_file,
                           &verification_mode, &protocol,
-                          &cacerts_file, &ciphers))
+                          &cacerts_file,
+                          &npn_protocols,
+                          &ciphers))
         return NULL;
 
     /*
@@ -454,7 +533,7 @@ PySSL_sslwrap(PyObject *self, PyObject *args)
     return (PyObject *) newPySSLObject(Sock, key_file, cert_file,
                                        server_side, verification_mode,
                                        protocol, cacerts_file,
-                                       ciphers);
+                                       npn_protocols, ciphers);
 }
 
 PyDoc_STRVAR(ssl_doc,
@@ -1114,6 +1193,27 @@ If the optional argument is True, returns a DER-encoded copy of the\n\
 peer certificate, or None if no certificate was provided.  This will\n\
 return the certificate even if it wasn't validated.");
 
+#ifdef OPENSSL_NPN_NEGOTIATED
+static PyObject *PySSL_selectedproto(PySSLObject *self) {
+
+    PyObject *retval;
+    const unsigned char *out;
+    unsigned int outlen;
+
+    SSL_get0_next_proto_negotiated(self->ssl,
+                                   &out, &outlen);
+
+    if (out == NULL)
+        retval = Py_None;
+    else {
+        retval = PyString_FromStringAndSize((char *) out, outlen);
+    }
+
+    Py_INCREF(retval);
+    return retval;
+}
+#endif
+
 static PyObject *PySSL_cipher (PySSLObject *self) {
 
     PyObject *retval, *v;
@@ -1537,6 +1637,9 @@ static PyMethodDef PySSLMethods[] = {
     {"issuer", (PyCFunction)PySSL_issuer, METH_NOARGS},
     {"peer_certificate", (PyCFunction)PySSL_peercert, METH_VARARGS,
      PySSL_peercert_doc},
+#ifdef OPENSSL_NPN_NEGOTIATED
+    {"selected_npn_protocol", (PyCFunction)PySSL_selectedproto, METH_NOARGS},
+#endif
     {"cipher", (PyCFunction)PySSL_cipher, METH_NOARGS},
     {"shutdown", (PyCFunction)PySSL_SSLshutdown, METH_NOARGS,
      PySSL_SSLshutdown_doc},
@@ -1815,6 +1918,12 @@ init_ssl2(void)
                             PY_SSL_VERSION_SSL23);
     PyModule_AddIntConstant(m, "PROTOCOL_TLSv1",
                             PY_SSL_VERSION_TLS1);
+
+#ifdef OPENSSL_NPN_NEGOTIATED
+    PyModule_AddIntConstant(m, "HAS_NPN", 1);
+#else
+    PyModule_AddIntConstant(m, "HAS_NPN", 0);
+#endif
 
     /* OpenSSL version */
     /* SSLeay() gives us the version of the library linked against,

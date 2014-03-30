@@ -53,7 +53,7 @@ Functions, Constants, and Exceptions
    is a subtype of :exc:`socket.error`, which in turn is a subtype of
    :exc:`IOError`.
 
-.. function:: wrap_socket (sock, keyfile=None, certfile=None, server_side=False, cert_reqs=CERT_NONE, ssl_version={see docs}, ca_certs=None, do_handshake_on_connect=True, suppress_ragged_eofs=True, ciphers=None)
+.. function:: wrap_socket (sock, keyfile=None, certfile=None, server_side=False, cert_reqs=CERT_NONE, ssl_version={see docs}, ca_certs=None, npn_protocols=None, do_handshake_on_connect=True, suppress_ragged_eofs=True, ciphers=None)
 
    Takes an instance ``sock`` of :class:`socket.socket`, and returns an instance
    of :class:`ssl2.SSLSocket`, a subtype of :class:`socket.socket`, which wraps
@@ -136,6 +136,16 @@ Functions, Constants, and Exceptions
    It should be a string in the `OpenSSL cipher list format
    <http://www.openssl.org/docs/apps/ciphers.html#CIPHER_LIST_FORMAT>`_.
 
+   The ``npn_protocols`` parameter specifies which protocols the socket should
+   avertise during the SSL/TLS handshake. It should be a list, like
+   ``['http/1.1', 'spdy/2']``, ordered by preference. The selection of a
+   protocol will happen during the handshake, and will play out
+   according to the `NPN draft specification
+   <http://tools.ietf.org/id/draft-agl-tls-nextprotoneg-02.txt>`_. Once a
+   protocol is selected, it is available through the :meth:`SSLSocket.selected_npn_protocol`
+   method. The NPN extension may not be available, depending on the system version
+   of OpenSSL.
+
    The parameter ``do_handshake_on_connect`` specifies whether to do the SSL
    handshake automatically after doing a :meth:`socket.connect`, or whether the
    application program will call it explicitly, by invoking the
@@ -151,6 +161,7 @@ Functions, Constants, and Exceptions
 
    .. versionchanged:: 2.7
       New optional argument *ciphers*.
+      New optional argument ``npn_protocols``
 
 .. function:: RAND_status()
 
@@ -234,6 +245,11 @@ Functions, Constants, and Exceptions
    certificates will be required from the other side of the socket connection.
    Note that use of this setting requires a valid certificate validation file
    also be passed as a value of the ``ca_certs`` parameter.
+
+.. data:: HAS_NPN
+
+   This will be ``True`` if the system version of OpenSSL supports the NPN
+   extension, and ``False`` otherwise.
 
 .. data:: PROTOCOL_SSLv2
 
@@ -370,6 +386,12 @@ SSL sockets also have the following additional methods and attributes:
    Returns a three-value tuple containing the name of the cipher being used, the
    version of the SSL protocol that defines its use, and the number of secret
    bits being used.  If no connection has been established, returns ``None``.
+
+.. method:: SSLSocket.selected_npn_protocol()
+
+   Returns the protocol that was selected during the TLS/SSL handshake. If
+   ``npn_protocols`` was not specified, or if the other party does not support
+   NPN, or if the handshake has not happened yet, this will return ``None``.
 
 .. method:: SSLSocket.do_handshake()
 
